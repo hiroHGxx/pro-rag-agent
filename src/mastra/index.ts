@@ -4,6 +4,7 @@ import { PinoLogger } from '@mastra/loggers';
 import { LibSQLStore } from '@mastra/libsql';
 import { weatherWorkflow } from './workflows/weather-workflow';
 import { generalAgent } from './agents/general-agent';
+import { chunkerTool } from './tools/chunker-tool';
 
 export const mastra = new Mastra({
   workflows: { weatherWorkflow },
