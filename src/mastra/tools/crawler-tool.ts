@@ -3,6 +3,65 @@ import { z } from 'zod';
 import puppeteer, { Browser } from 'puppeteer'; // Browserをインポート
 import * as cheerio from 'cheerio';
 
+interface ConvexHttpClient {
+  query(name: string, args?: any): Promise<any>;
+  mutation(name: string, args?: any): Promise<any>;
+}
+
+class ConvexClient implements ConvexHttpClient {
+  private baseUrl: string;
+
+  constructor(convexUrl: string) {
+    this.baseUrl = convexUrl;
+  }
+
+  async query(name: string, args?: any): Promise<any> {
+    const response = await fetch(`${this.baseUrl}/api/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        path: name,
+        args: args || {},
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Convex query failed: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  async mutation(name: string, args?: any): Promise<any> {
+    const response = await fetch(`${this.baseUrl}/api/mutation`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        path: name,
+        args: args || {},
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Convex mutation failed: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+}
+
+const getConvexClient = (): ConvexClient => {
+  const convexUrl = process.env.CONVEX_URL;
+  if (!convexUrl) {
+    throw new Error('CONVEX_URL environment variable is required');
+  }
+  return new ConvexClient(convexUrl);
+};
+
 // インターフェースや、cleanText, extractLinks, getDomain関数は変更なし
 interface CrawlResult {
   url: string;
@@ -43,15 +102,15 @@ const getDomain = (url: string): string => {
   }
 };
 
-// crawlPage関数は、引数に browser を受け取るように変更
+// crawlPage関数を修正
 const crawlPage = async (
   browser: Browser, // browserインスタンスを受け取る
+  ctx: ConvexClient, // Convexクライアントを受け取る
   url: string,
   visited: Set<string>,
   baseDomain: string,
   currentDepth: number,
   maxDepth: number,
-  results: CrawlResult[],
   errors: CrawlError[]
 ): Promise<void> => {
   const normalizedUrl = new URL(url).href;
@@ -86,7 +145,8 @@ const crawlPage = async (
 
     const text = cleanText(html);
     if (text.length > 0) {
-      results.push({ url: normalizedUrl, text });
+      await ctx.mutation('crawled_pages:add', { url: normalizedUrl, text });
+      console.log(`[CRAWLER] Stored page to DB: ${normalizedUrl}`);
     }
 
     if (currentDepth < maxDepth) {
@@ -94,8 +154,8 @@ const crawlPage = async (
       console.log(`[CRAWLER DEBUG] Found ${links.length} links on ${normalizedUrl}`);
 
       const crawlPromises = links.map(link =>
-        // 再帰呼び出しにも browser を渡す
-        crawlPage(browser, link, visited, baseDomain, currentDepth + 1, maxDepth, results, errors)
+        // 再帰呼び出しにも browser と ctx を渡す
+        crawlPage(browser, ctx, link, visited, baseDomain, currentDepth + 1, maxDepth, errors)
       );
 
       const batchSize = 3;
@@ -115,17 +175,13 @@ const crawlPage = async (
 
 // executeメソッドをリファクタリング
 export const crawlerTool = createTool({
-  id: 'web-crawler',
+  id: 'web_crawler',
   description: '指定されたWebサイトを巡回し、各ページのテキストコンテンツを取得します。',
   inputSchema: z.object({
-    startUrl: z.string().url().describe('クロールを開始するURL'),
+    startUrl: z.string().describe('クロールを開始するURL'),
     maxDepth: z.number().min(0).max(5).describe('巡回する階層の深さ（0-5）'),
   }),
   outputSchema: z.object({
-    results: z.array(z.object({
-      url: z.string(),
-      text: z.string(),
-    })),
     errors: z.array(z.object({
       url: z.string(),
       error: z.string(),
@@ -139,7 +195,6 @@ export const crawlerTool = createTool({
   execute: async ({ context }) => {
     const { startUrl, maxDepth } = context;
     const visited = new Set<string>();
-    const results: CrawlResult[] = [];
     const errors: CrawlError[] = [];
     const baseDomain = getDomain(startUrl);
 
@@ -147,21 +202,23 @@ export const crawlerTool = createTool({
       throw new Error('Invalid start URL provided');
     }
 
+    // Convexクライアントを初期化
+    const convexClient = getConvexClient();
+
     // 最初に一度だけブラウザを起動
     const browser = await puppeteer.launch();
     try {
-      // crawlPageにbrowserインスタンスを渡す
-      await crawlPage(browser, startUrl, visited, baseDomain, 0, maxDepth, results, errors);
+      // crawlPageにbrowserインスタンスとconvexクライアントを渡す
+      await crawlPage(browser, convexClient, startUrl, visited, baseDomain, 0, maxDepth, errors);
     } finally {
       // 全ての処理が終わったら、最後にブラウザを閉じる
       await browser.close();
     }
 
     return {
-      results,
       errors,
       summary: {
-        totalPages: results.length,
+        totalPages: visited.size,
         totalErrors: errors.length,
         crawlDepth: maxDepth,
       },
