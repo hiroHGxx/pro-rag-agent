@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { RecursiveCharacterTextSplitter } from 'langchain/text_splitter';
 
 export const chunkerTool = createTool({
-  id: 'text-chunker',
+  id: 'text_chunker',
   description: '長いテキストを意味のあるチャンクに分割します。',
   inputSchema: z.object({
     content: z.string(),

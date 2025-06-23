@@ -1,5 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
+import { GoogleGenerativeAIEmbeddings } from '@langchain/google-genai';
 
 interface ConvexHttpClient {
   query(name: string, args?: any): Promise<any>;
@@ -60,50 +61,50 @@ const getConvexClient = (): ConvexClient => {
   return new ConvexClient(convexUrl);
 };
 
-export const addMessageTool = createTool({
-  id: 'add_message',
-  description: 'Convexデータベースに、新しいメッセージを書き込みます。',
+export const embeddingStorageTool = createTool({
+  id: 'embedding_storage',
+  description: 'テキストチャンクの配列をベクトル化し、データベースに保存します。',
   inputSchema: z.object({
-    author: z.string().describe('メッセージの作成者'),
-    body: z.string().describe('メッセージの内容'),
+    chunks: z.array(z.string()).describe('ベクトル化して保存するテキストチャンクの配列'),
   }),
   outputSchema: z.object({
-    id: z.string(),
-    success: z.boolean(),
+    storedCount: z.number().describe('正常に保存されたチャンクの数'),
   }),
   execute: async ({ context }) => {
-    const client = getConvexClient();
-    const result = await client.mutation('messages:send', {
-      author: context.author,
-      body: context.body,
+    const { chunks } = context;
+    
+    const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    if (!apiKey) {
+      throw new Error('GOOGLE_GENERATIVE_AI_API_KEY environment variable is required');
+    }
+
+    const embeddings = new GoogleGenerativeAIEmbeddings({
+      apiKey,
+      model: "models/embedding-001",
     });
+
+    let storedCount = 0;
+    for (const chunk of chunks) {
+      try {
+        const vector = await embeddings.embedQuery(chunk);
+        
+        // Convex client を使用してmutationを呼び出す
+        const client = getConvexClient();
+        await client.mutation('documents:add', {
+          text: chunk,
+          embedding: vector,
+        });
+
+        storedCount++;
+        console.log(`[STORAGE] Stored chunk: ${chunk.substring(0, 50)}...`);
+
+      } catch (error) {
+        console.error(`[STORAGE_ERROR] Failed to store chunk. Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
     
     return {
-      id: result.id || result._id || 'unknown',
-      success: true,
+      storedCount,
     };
-  },
-});
-
-export const listMessagesTool = createTool({
-  id: 'list_messages',
-  description: 'Convexデータベースにある全てのメッセージを取得します。',
-  inputSchema: z.object({}),
-  outputSchema: z.array(z.object({
-    id: z.string(),
-    author: z.string(),
-    body: z.string(),
-    _creationTime: z.number().optional(),
-  })),
-  execute: async () => {
-    const client = getConvexClient();
-    const messages = await client.query('messages:list');
-    
-    return messages.value.map((msg: any) => ({
-      id: msg.id || msg._id || 'unknown',
-      author: msg.author,
-      body: msg.body,
-      _creationTime: msg._creationTime,
-    }));
   },
 });
